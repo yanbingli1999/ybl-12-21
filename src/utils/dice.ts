@@ -1,5 +1,6 @@
-import type { Die, CabinType, DiceFace } from '../types';
+import type { Die, CabinType, DiceFace, ProtoTechState } from '../types';
 import { standardDiceFaces } from '../data/diceFaces';
+import { hasFirstRerollPreserve } from './protoTech';
 
 export function createDie(id: string): Die {
   return {
@@ -20,14 +21,38 @@ export function rollDie(diceFaces: DiceFace[] = standardDiceFaces): number {
   return diceFaces[index].value;
 }
 
-export function rollDice(dice: Die[], diceFaces?: DiceFace[]): Die[] {
-  return dice.map(die => {
-    if (die.locked) return die;
+export function rollDice(
+  dice: Die[],
+  diceFaces?: DiceFace[],
+  techState: ProtoTechState = { researched: [], enabled: [], coreData: 0 },
+  isFirstReroll: boolean = false
+): Die[] {
+  let preservedDice: Die[] = [];
+  let diceToRoll = [...dice];
+
+  if (isFirstReroll && hasFirstRerollPreserve(techState)) {
+    const unlockedDice = dice.filter(d => !d.locked && d.value > 0);
+    if (unlockedDice.length > 0) {
+      const sortedUnlocked = [...unlockedDice].sort((a, b) => b.value - a.value);
+      const toPreserve = sortedUnlocked.slice(0, 1).map(d => d.id);
+      
+      preservedDice = dice.filter(d => toPreserve.includes(d.id) || d.locked);
+      diceToRoll = dice.filter(d => !toPreserve.includes(d.id) && !d.locked);
+    }
+  }
+
+  const rolledDice = diceToRoll.map(die => {
     return {
       ...die,
       value: rollDie(diceFaces),
       isRolling: true,
     };
+  });
+
+  return [...preservedDice.map(d => ({ ...d })), ...rolledDice].sort((a, b) => {
+    const aNum = parseInt(a.id.replace('die_', ''));
+    const bNum = parseInt(b.id.replace('die_', ''));
+    return aNum - bNum;
   });
 }
 

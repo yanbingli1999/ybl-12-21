@@ -4,15 +4,18 @@ import type {
   Enemy, ReplayData, ReplayAction
 } from '../types';
 import { getRandomEnemy, generateEnemyIntent } from '../data/enemies';
+import { rollCoreDataDrop } from '../data/protoTech';
 import { useShipStore } from './useShipStore';
 import { useDiceStore } from './useDiceStore';
 import { useConfigStore } from './useConfigStore';
+import { useProtoTechStore } from './useProtoTechStore';
 import { 
   executePlayerActions, 
   executeEnemyIntent, 
   checkBattleEnd,
   calculateReward,
 } from '../utils/battle';
+import { applyTechToConfig, applyTechToShip, applyCritAlertEffect, getExtraEnergyRegen } from '../utils/protoTech';
 import { addBattleRecord, loadBattleHistory, updateStats } from '../utils/storage';
 import { unassignAllDice } from '../utils/dice';
 
@@ -52,10 +55,13 @@ export const useGameStore = create<GameState>((set, get) => ({
   startBattle: () => {
     const { currentDifficulty } = get();
     const shipStore = useShipStore.getState();
-    const config = useConfigStore.getState().config;
+    const protoTechStore = useProtoTechStore.getState();
+    const baseConfig = useConfigStore.getState().config;
+    const config = applyTechToConfig(baseConfig, protoTechStore.protoTechState);
     
     shipStore.applyUpgradeEffects();
-    const player = { ...shipStore.ship };
+    let player = { ...shipStore.ship };
+    player = applyTechToShip(player, protoTechStore.protoTechState);
     player.hp = player.maxHp;
     player.shield = player.maxShield;
     player.energy = player.maxEnergy;
@@ -102,8 +108,11 @@ export const useGameStore = create<GameState>((set, get) => ({
     if (!battleState || battleState.phase !== 'player') return;
     
     const diceStore = useDiceStore.getState();
-    const config = useConfigStore.getState().config;
+    const baseConfig = useConfigStore.getState().config;
     const shipStore = useShipStore.getState();
+    const protoTechStore = useProtoTechStore.getState();
+    const techState = protoTechStore.protoTechState;
+    const config = applyTechToConfig(baseConfig, techState);
     
     const { dice } = diceStore;
     const wasDefending = battleState.enemy.intent.type === 'defend';
@@ -118,7 +127,8 @@ export const useGameStore = create<GameState>((set, get) => ({
       dice,
       battleState.player,
       preparedEnemy,
-      config
+      config,
+      techState
     );
     
     let newState: BattleState = {
@@ -127,6 +137,20 @@ export const useGameStore = create<GameState>((set, get) => ({
       enemy: playerResult.newEnemy,
       logs: [...battleState.logs, ...playerResult.logs.map(l => ({ ...l, turn: battleState.turn }))],
     };
+    
+    if (playerResult.critTriggered) {
+      newState.enemy = applyCritAlertEffect(newState.enemy, techState);
+      if (techState.enabled.includes('tech_crit_alert')) {
+        newState.logs.push({
+          id: `log_${Date.now()}_alert`,
+          turn: battleState.turn,
+          type: 'effect',
+          source: 'player',
+          message: '警戒标记触发！敌方闪避降低但攻击提升',
+          timestamp: Date.now(),
+        });
+      }
+    }
     
     const result = checkBattleEnd(newState.player, newState.enemy);
     if (result !== 'ongoing') {
@@ -258,18 +282,21 @@ export const useGameStore = create<GameState>((set, get) => ({
     
     newState.enemy = generateEnemyIntent(newState.enemy);
     
-    const playerEvasionReset = useShipStore.getState().ship.evasion;
+    const baseShip = useShipStore.getState().ship;
+    const adjustedShip = applyTechToShip(baseShip, techState);
     newState.player = {
       ...newState.player,
-      evasion: playerEvasionReset,
+      evasion: adjustedShip.evasion,
     };
     
     newState.turn += 1;
     newState.phase = 'player';
     
+    const baseEnergyRegen = Math.floor(newState.player.maxEnergy * 0.5);
+    const extraEnergy = getExtraEnergyRegen(techState);
     newState.player = {
       ...newState.player,
-      energy: Math.min(newState.player.maxEnergy, newState.player.energy + Math.floor(newState.player.maxEnergy * 0.5)),
+      energy: Math.min(newState.player.maxEnergy, newState.player.energy + baseEnergyRegen + extraEnergy),
     };
     
     const replayAction: ReplayAction = {
@@ -311,10 +338,15 @@ export const useGameStore = create<GameState>((set, get) => ({
     if (!battleState) return;
     
     const shipStore = useShipStore.getState();
+    const protoTechStore = useProtoTechStore.getState();
     const config = useConfigStore.getState().config;
     
     const reward = result === 'victory' 
       ? calculateReward(result, battleState.turn, get().currentDifficulty)
+      : 0;
+    
+    const coreDataDrop = result === 'victory' 
+      ? rollCoreDataDrop(battleState.enemy.type)
       : 0;
     
     const newState: BattleState = {
@@ -343,6 +375,19 @@ export const useGameStore = create<GameState>((set, get) => ({
     
     if (reward > 0) {
       shipStore.addRewardPoints(reward);
+    }
+    
+    if (coreDataDrop > 0) {
+      protoTechStore.addCoreData(coreDataDrop);
+      newState.logs.push({
+        id: `log_${Date.now()}_core`,
+        turn: battleState.turn,
+        type: 'effect',
+        source: 'system',
+        message: `获得 ${coreDataDrop} 个核心数据！`,
+        value: coreDataDrop,
+        timestamp: Date.now(),
+      });
     }
     
     const newStats = { ...shipStore.stats };

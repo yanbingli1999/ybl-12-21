@@ -1,7 +1,18 @@
 import type { 
   Ship, Enemy, Die, CabinType, DamageResult, BattleLogEntry,
-  GameConfig, AllocationResult, EnemyIntent
+  GameConfig, AllocationResult, EnemyIntent, ProtoTechState
 } from '../types';
+import {
+  getShieldOverflowConversionRate,
+  getShieldEfficiencyMultiplier,
+  getRepairEfficiencyMultiplier,
+  hasRepairCooling,
+  getNormalDamageMultiplier,
+  getEvasionCritBonus,
+  getEnergyCostMultiplier,
+  getExtraEnergyRegen,
+  getCabinDamageChanceBonus,
+} from './protoTech';
 
 export function calculateDamage(
   baseDamage: number,
@@ -70,7 +81,8 @@ export function calculateCabinEffect(
   totalPoints: number,
   ship: Ship,
   enemy: Enemy,
-  config: GameConfig
+  config: GameConfig,
+  techState: ProtoTechState = { researched: [], enabled: [], coreData: 0 }
 ): { 
   effect: string; 
   value: number; 
@@ -91,7 +103,8 @@ export function calculateCabinEffect(
   switch (cabinType) {
     case 'weapon': {
       const baseDamage = ship.attack + effectivePoints * 3;
-      const damage = Math.floor(baseDamage * levelMultiplier);
+      let damage = Math.floor(baseDamage * levelMultiplier);
+      damage = Math.floor(damage * getNormalDamageMultiplier(techState));
       result = {
         effect: isOverheated ? '武器舱过热！无法开火' : `武器系统造成 ${damage} 点伤害`,
         value: damage,
@@ -100,7 +113,8 @@ export function calculateCabinEffect(
       break;
     }
     case 'shield': {
-      const shieldGain = Math.floor(effectivePoints * 3 * levelMultiplier);
+      const shieldEfficiency = getShieldEfficiencyMultiplier(techState);
+      const shieldGain = Math.floor(effectivePoints * 3 * levelMultiplier * shieldEfficiency);
       result = {
         effect: isOverheated ? '护盾舱过热！无法充能' : `护盾充能 +${shieldGain}`,
         value: shieldGain,
@@ -109,7 +123,8 @@ export function calculateCabinEffect(
       break;
     }
     case 'repair': {
-      const healAmount = Math.floor(effectivePoints * 2 * levelMultiplier);
+      const repairEfficiency = getRepairEfficiencyMultiplier(techState);
+      const healAmount = Math.floor(effectivePoints * 2 * levelMultiplier * repairEfficiency);
       result = {
         effect: isOverheated ? '维修舱过热！无法工作' : `船体修复 +${healAmount} HP`,
         value: healAmount,
@@ -264,7 +279,8 @@ export function executePlayerActions(
   dice: Die[],
   player: Ship,
   enemy: Enemy,
-  config: GameConfig
+  config: GameConfig,
+  techState: ProtoTechState = { researched: [], enabled: [], coreData: 0 }
 ): {
   logs: BattleLogEntry[];
   newPlayer: Ship;
@@ -274,6 +290,7 @@ export function executePlayerActions(
   totalShieldGained: number;
   damagedCabins: CabinType[];
   energyUsed: number;
+  critTriggered: boolean;
 } {
   const logs: BattleLogEntry[] = [];
   let newPlayer = { ...player };
@@ -284,9 +301,11 @@ export function executePlayerActions(
   const damagedCabins: CabinType[] = [];
   let playerEvasionBonus = 0;
   let enemyEvasionReduction = 0;
+  let critTriggered = false;
 
   const totalDicePoints = dice.reduce((sum, d) => sum + d.value, 0);
-  const energyCost = Math.floor(totalDicePoints * config.energyCostPerPoint);
+  const energyCostMultiplier = getEnergyCostMultiplier(techState);
+  const energyCost = Math.floor(totalDicePoints * config.energyCostPerPoint * energyCostMultiplier);
   const actualEnergyCost = Math.min(newPlayer.energy, energyCost);
   const energyBefore = newPlayer.energy;
   newPlayer.energy = Math.max(0, newPlayer.energy - actualEnergyCost);
@@ -314,7 +333,10 @@ export function executePlayerActions(
     }
 
     const isOverheated = allocation.totalPoints > config.overheatThreshold;
-    if (isOverheated) {
+    const cabinDamageChanceBonus = getCabinDamageChanceBonus(techState);
+    const shouldDamage = isOverheated || (Math.random() < cabinDamageChanceBonus && allocation.totalPoints > config.overheatThreshold * 0.7);
+    
+    if (shouldDamage) {
       damagedCabins.push(allocation.cabinType);
       logs.push(createLog('system', 'effect', `${cabin.name} 过热损坏！需要 ${config.repairCooldown} 回合冷却`, undefined, 1));
     }
@@ -324,19 +346,21 @@ export function executePlayerActions(
       allocation.totalPoints * efficiencyPenalty,
       newPlayer,
       newEnemy,
-      config
+      config,
+      techState
     );
 
     logs.push(createLog('player', effect.type, effect.effect, effect.value, 1));
 
     switch (allocation.cabinType) {
       case 'weapon': {
-        if (!isOverheated) {
+        if (!shouldDamage) {
           const weaponDice = dice.filter(d => d.assignedTo === 'weapon');
           const sixCount = weaponDice.filter(d => d.value === 6).length;
           const bonusCritRate = sixCount * config.critBonusRate;
           const guaranteedCrit = sixCount >= 2;
-          const totalCritRate = Math.min(0.9, player.critRate + bonusCritRate);
+          const evasionCritBonus = getEvasionCritBonus(techState, newEnemy.evasion);
+          const totalCritRate = Math.min(0.9, player.critRate + bonusCritRate + evasionCritBonus);
 
           // #region debug-point H2:six-crit-calc
           fetch("http://127.0.0.1:7777/event",{method:"POST",body:JSON.stringify({sessionId:"battle-mechanics-bugs",runId:"pre-fix",hypothesisId:"H2",location:"battle.ts:324",msg:"[DEBUG] Six-dice crit rate calculation",data:{weaponDice:weaponDice.map(d=>({id:d.id,value:d.value})),sixCount,bonusCritRate,baseCritRate:player.critRate,totalCritRate,critBonusRate:config.critBonusRate},ts:Date.now()})}).catch(()=>{});
@@ -362,6 +386,7 @@ export function executePlayerActions(
             
             if (damageResult.isCrit) {
               logs.push(createLog('player', 'crit', '暴击！', damageResult.damage, 1));
+              critTriggered = true;
             }
 
             // #region debug-point H2:crit-result
@@ -380,36 +405,55 @@ export function executePlayerActions(
         break;
       }
       case 'shield': {
-        if (!isOverheated) {
+        if (!shouldDamage) {
           const shieldGain = Math.min(effect.value, newPlayer.maxShield - newPlayer.shield);
+          const overflow = Math.max(0, effect.value - (newPlayer.maxShield - newPlayer.shield));
           newPlayer.shield = Math.min(newPlayer.maxShield, newPlayer.shield + effect.value);
           totalShieldGained += shieldGain;
+          
+          if (overflow > 0) {
+            const conversionRate = getShieldOverflowConversionRate(techState);
+            if (conversionRate > 0) {
+              const energyGain = Math.floor(overflow * conversionRate);
+              if (energyGain > 0) {
+                newPlayer.energy = Math.min(newPlayer.maxEnergy, newPlayer.energy + energyGain);
+                logs.push(createLog('player', 'effect', `护盾溢出转化为 ${energyGain} 能量`, energyGain, 1));
+              }
+            }
+          }
         }
         break;
       }
       case 'repair': {
-        if (!isOverheated) {
+        if (!shouldDamage) {
           const healAmount = Math.min(effect.value, newPlayer.maxHp - newPlayer.hp);
           newPlayer.hp = Math.min(newPlayer.maxHp, newPlayer.hp + effect.value);
           totalHealDone += healAmount;
           
+          const coolingAmount = hasRepairCooling(techState) ? 1 : 0;
           newPlayer.cabins = newPlayer.cabins.map(c => {
             if (c.damaged && c.cooldown > 0) {
-              return { ...c, cooldown: c.cooldown - 1, damaged: c.cooldown - 1 > 0 };
+              const reduceAmount = 1 + coolingAmount;
+              const newCooldown = c.cooldown - reduceAmount;
+              return { ...c, cooldown: Math.max(0, newCooldown), damaged: newCooldown > 0 };
             }
             return c;
           });
+          
+          if (coolingAmount > 0) {
+            logs.push(createLog('player', 'effect', '维修冷却系统激活，额外降低所有舱室冷却', undefined, 1));
+          }
         }
         break;
       }
       case 'engine': {
-        if (!isOverheated) {
+        if (!shouldDamage) {
           playerEvasionBonus += effect.value;
         }
         break;
       }
       case 'scanner': {
-        if (!isOverheated) {
+        if (!shouldDamage) {
           enemyEvasionReduction += effect.value;
         }
         break;
@@ -445,6 +489,7 @@ export function executePlayerActions(
     totalShieldGained,
     damagedCabins,
     energyUsed: actualEnergyCost,
+    critTriggered,
   };
 }
 

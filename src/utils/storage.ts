@@ -145,3 +145,42 @@ export function importSaveData(jsonString: string): boolean {
     return false;
   }
 }
+
+export function saveProtoTech(researched: string[]): void {
+  const data = loadSaveData();
+  data.protoTech = {
+    ...(data.protoTech || { researched: [], enabled: [], coreData: 0 }),
+    researched,
+  };
+  saveSaveData(data);
+}
+
+export function loadProtoTech(): string[] {
+  return loadSaveData().protoTech?.researched || [];
+}
+
+export function saveEnabledTech(enabled: string[]): void {
+  const data = loadSaveData();
+  data.protoTech = {
+    ...(data.protoTech || { researched: [], enabled: [], coreData: 0 }),
+    enabled,
+  };
+  saveSaveData(data);
+}
+
+export function loadEnabledTech(): string[] {
+  return loadSaveData().protoTech?.enabled || [];
+}
+
+export function saveCoreData(coreData: number): void {
+  const data = loadSaveData();
+  data.protoTech = {
+    ...(data.protoTech || { researched: [], enabled: [], coreData: 0 }),
+    coreData,
+  };
+  saveSaveData(data);
+}
+
+export function loadCoreData(): number {
+  return loadSaveData().protoTech?.coreData || 0;
+}

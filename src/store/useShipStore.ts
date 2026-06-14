@@ -8,6 +8,7 @@ import {
   loadRewardPoints, saveRewardPoints,
   loadStats, updateStats,
 } from '../utils/storage';
+import { useProtoTechStore } from './useProtoTechStore';
 
 interface ShipState {
   ship: Ship;
@@ -38,6 +39,7 @@ export const useShipStore = create<ShipState>((set, get) => ({
     const stats = loadStats();
     
     set({ ship, upgrades, rewardPoints, stats });
+    useProtoTechStore.getState().loadSavedData();
   },
   
   updateShip: (updates) => {

@@ -196,3 +196,63 @@ export interface DamageResult {
   isCrit: boolean;
   isMiss: boolean;
 }
+
+export type ProtoTechEffectType =
+  | 'first_reroll_preserve'
+  | 'shield_overflow_to_energy'
+  | 'repair_cooling'
+  | 'crit_increase_alert'
+  | 'overheat_threshold_boost'
+  | 'energy_regen_boost'
+  | 'damage_crit_bonus'
+  | 'shield_absorption_boost'
+  | 'evasion_crit_penalty'
+  | 'repair_cooldown_reduce';
+
+export interface ProtoTechSideEffect {
+  type: string;
+  value: number;
+  description: string;
+}
+
+export interface ProtoTech {
+  id: string;
+  name: string;
+  description: string;
+  cost: number;
+  coreDataRequired: number;
+  tier: 1 | 2 | 3;
+  branch: 'offense' | 'defense' | 'utility' | 'manipulation';
+  effect: {
+    type: ProtoTechEffectType;
+    value: number;
+    description: string;
+  };
+  sideEffect: ProtoTechSideEffect;
+  prerequisites: string[];
+  mutuallyExclusive: string[];
+  icon: string;
+}
+
+export interface ProtoTechState {
+  researched: string[];
+  enabled: string[];
+  coreData: number;
+}
+
+export interface EnemyDrop {
+  enemyType: string;
+  coreDataChance: number;
+  coreDataMin: number;
+  coreDataMax: number;
+}
+
+export interface GameSaveData {
+  ship: Ship;
+  upgrades: Upgrade[];
+  config: GameConfig;
+  battleHistory: BattleRecord[];
+  stats: GameStats;
+  rewardPoints: number;
+  protoTech?: ProtoTechState;
+}
