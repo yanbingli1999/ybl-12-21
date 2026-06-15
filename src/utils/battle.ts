@@ -7,11 +7,14 @@ import {
   getShieldEfficiencyMultiplier,
   getRepairEfficiencyMultiplier,
   hasRepairCooling,
+  hasNanoRepairSwarm,
   getNormalDamageMultiplier,
   getEvasionCritBonus,
-  getEnergyCostMultiplier,
-  getExtraEnergyRegen,
-  getCabinDamageChanceBonus,
+  hasCritPierceShield,
+  hasOverheatToShield,
+  getOverheatToShieldRate,
+  getShieldReflectRate,
+  calculateDiceEnergyResonance,
 } from './protoTech';
 
 export function calculateDamage(
@@ -52,11 +55,20 @@ export function calculateDamage(
 export function applyShieldAbsorption(
   damageResult: DamageResult,
   currentShield: number,
-  config: GameConfig
+  config: GameConfig,
+  pierceShield: boolean = false
 ): { damage: number; shieldAbsorbed: number; remainingShield: number } {
   if (damageResult.isMiss || damageResult.damage <= 0) {
     return {
       damage: 0,
+      shieldAbsorbed: 0,
+      remainingShield: currentShield,
+    };
+  }
+
+  if (pierceShield) {
+    return {
+      damage: damageResult.damage,
       shieldAbsorbed: 0,
       remainingShield: currentShield,
     };
@@ -187,13 +199,15 @@ export function getAllocations(dice: Die[]): AllocationResult[] {
 export function executeEnemyIntent(
   enemy: Enemy,
   player: Ship,
-  config: GameConfig
+  config: GameConfig,
+  techState: ProtoTechState = { researched: [], enabled: [], coreData: 0 }
 ): { 
   damageResult: DamageResult; 
   shieldResult: { damage: number; shieldAbsorbed: number; remainingShield: number };
   logs: BattleLogEntry[];
   newPlayerHp: number;
   newPlayerShield: number;
+  reflectDamage: number;
   effect?: string;
 } {
   const logs: BattleLogEntry[] = [];
@@ -265,12 +279,22 @@ export function executeEnemyIntent(
     logs.push(createLog('player', 'damage', `受到 ${shieldResult.damage} 点伤害`, shieldResult.damage, 1));
   }
 
+  let reflectDamage = 0;
+  const shieldReflectRate = getShieldReflectRate(techState);
+  if (shieldReflectRate > 0 && shieldResult.shieldAbsorbed > 0) {
+    reflectDamage = Math.floor(shieldResult.shieldAbsorbed * shieldReflectRate);
+    if (reflectDamage > 0) {
+      logs.push(createLog('enemy', 'damage', `护盾反弹 ${reflectDamage} 点伤害`, reflectDamage, 1));
+    }
+  }
+
   return {
     damageResult,
     shieldResult,
     logs,
     newPlayerHp,
     newPlayerShield,
+    reflectDamage,
     effect: specialEffect,
   };
 }
@@ -304,18 +328,26 @@ export function executePlayerActions(
   let critTriggered = false;
 
   const totalDicePoints = dice.reduce((sum, d) => sum + d.value, 0);
-  const energyCostMultiplier = getEnergyCostMultiplier(techState);
-  const energyCost = Math.floor(totalDicePoints * config.energyCostPerPoint * energyCostMultiplier);
+  const energyCost = Math.floor(totalDicePoints * config.energyCostPerPoint);
   const actualEnergyCost = Math.min(newPlayer.energy, energyCost);
   const energyBefore = newPlayer.energy;
   newPlayer.energy = Math.max(0, newPlayer.energy - actualEnergyCost);
 
+  const diceEnergy = calculateDiceEnergyResonance(dice, techState);
+  if (diceEnergy > 0) {
+    newPlayer.energy = Math.min(newPlayer.maxEnergy, newPlayer.energy + diceEnergy);
+  }
+
   // #region debug-point H1:energy-cost
-  fetch("http://127.0.0.1:7777/event",{method:"POST",body:JSON.stringify({sessionId:"battle-mechanics-bugs",runId:"pre-fix",hypothesisId:"H1",location:"battle.ts:282",msg:"[DEBUG] Energy cost calculation",data:{totalDicePoints,energyCostPerPoint:config.energyCostPerPoint,energyCost,actualEnergyCost,energyBefore,energyAfter:newPlayer.energy},ts:Date.now()})}).catch(()=>{});
+  fetch("http://127.0.0.1:7777/event",{method:"POST",body:JSON.stringify({sessionId:"battle-mechanics-bugs",runId:"pre-fix",hypothesisId:"H1",location:"battle.ts:282",msg:"[DEBUG] Energy cost calculation",data:{totalDicePoints,energyCostPerPoint:config.energyCostPerPoint,energyCost,actualEnergyCost,energyBefore,energyAfter:newPlayer.energy,diceEnergy},ts:Date.now()})}).catch(()=>{});
   // #endregion
 
   if (actualEnergyCost > 0) {
     logs.push(createLog('player', 'effect', `消耗 ${actualEnergyCost} 能量`, actualEnergyCost, 1));
+  }
+
+  if (diceEnergy > 0) {
+    logs.push(createLog('player', 'effect', `骰子共鸣产生 ${diceEnergy} 能量`, diceEnergy, 1));
   }
 
   const energyShortage = energyCost > player.energy;
@@ -333,12 +365,22 @@ export function executePlayerActions(
     }
 
     const isOverheated = allocation.totalPoints > config.overheatThreshold;
-    const cabinDamageChanceBonus = getCabinDamageChanceBonus(techState);
-    const shouldDamage = isOverheated || (Math.random() < cabinDamageChanceBonus && allocation.totalPoints > config.overheatThreshold * 0.7);
+    const shouldDamage = isOverheated;
     
     if (shouldDamage) {
       damagedCabins.push(allocation.cabinType);
       logs.push(createLog('system', 'effect', `${cabin.name} 过热损坏！需要 ${config.repairCooldown} 回合冷却`, undefined, 1));
+      
+      if (hasOverheatToShield(techState)) {
+        const overflowPoints = allocation.totalPoints - config.overheatThreshold;
+        const shieldGain = Math.floor(overflowPoints * getOverheatToShieldRate(techState));
+        if (shieldGain > 0) {
+          const actualGain = Math.min(shieldGain, newPlayer.maxShield - newPlayer.shield);
+          newPlayer.shield = Math.min(newPlayer.maxShield, newPlayer.shield + shieldGain);
+          totalShieldGained += actualGain;
+          logs.push(createLog('player', 'shield', `热量循环转化为 ${actualGain} 护盾`, actualGain, 1));
+        }
+      }
     }
 
     const effect = calculateCabinEffect(
@@ -378,19 +420,22 @@ export function executePlayerActions(
           if (damageResult.isMiss) {
             logs.push(createLog('enemy', 'miss', '敌方闪避了攻击！', undefined, 1));
           } else {
-            const shieldAbsorption = applyShieldAbsorption(damageResult, newEnemy.shield, config);
-            
-            if (shieldAbsorption.shieldAbsorbed > 0) {
-              logs.push(createLog('enemy', 'shield', `敌方护盾吸收 ${shieldAbsorption.shieldAbsorbed} 伤害`, shieldAbsorption.shieldAbsorbed, 1));
-            }
+            const pierceShield = hasCritPierceShield(techState) && damageResult.isCrit;
+            const shieldAbsorption = applyShieldAbsorption(damageResult, newEnemy.shield, config, pierceShield);
             
             if (damageResult.isCrit) {
-              logs.push(createLog('player', 'crit', '暴击！', damageResult.damage, 1));
+              if (pierceShield) {
+                logs.push(createLog('player', 'crit', '穿甲暴击！无视护盾', damageResult.damage, 1));
+              } else {
+                logs.push(createLog('player', 'crit', '暴击！', damageResult.damage, 1));
+              }
               critTriggered = true;
+            } else if (shieldAbsorption.shieldAbsorbed > 0) {
+              logs.push(createLog('enemy', 'shield', `敌方护盾吸收 ${shieldAbsorption.shieldAbsorbed} 伤害`, shieldAbsorption.shieldAbsorbed, 1));
             }
 
             // #region debug-point H2:crit-result
-            fetch("http://127.0.0.1:7777/event",{method:"POST",body:JSON.stringify({sessionId:"battle-mechanics-bugs",runId:"pre-fix",hypothesisId:"H2",location:"battle.ts:346",msg:"[DEBUG] Crit result",data:{damage:damageResult.damage,isCrit:damageResult.isCrit,isMiss:damageResult.isMiss,shieldAbsorbed:0},ts:Date.now()})}).catch(()=>{});
+            fetch("http://127.0.0.1:7777/event",{method:"POST",body:JSON.stringify({sessionId:"battle-mechanics-bugs",runId:"pre-fix",hypothesisId:"H2",location:"battle.ts:346",msg:"[DEBUG] Crit result",data:{damage:damageResult.damage,isCrit:damageResult.isCrit,isMiss:damageResult.isMiss,shieldAbsorbed:shieldAbsorption.shieldAbsorbed,pierceShield},ts:Date.now()})}).catch(()=>{});
             // #endregion
 
             newEnemy.shield = shieldAbsorption.remainingShield;
@@ -431,6 +476,8 @@ export function executePlayerActions(
           totalHealDone += healAmount;
           
           const coolingAmount = hasRepairCooling(techState) ? 1 : 0;
+          const hasNanoSwarm = hasNanoRepairSwarm(techState);
+          
           newPlayer.cabins = newPlayer.cabins.map(c => {
             if (c.damaged && c.cooldown > 0) {
               const reduceAmount = 1 + coolingAmount;
@@ -439,6 +486,19 @@ export function executePlayerActions(
             }
             return c;
           });
+          
+          if (hasNanoSwarm) {
+            const damagedCabinsList = newPlayer.cabins.filter(c => c.damaged);
+            if (damagedCabinsList.length > 0) {
+              const cabinToRepair = damagedCabinsList[0];
+              newPlayer.cabins = newPlayer.cabins.map(c => 
+                c.id === cabinToRepair.id 
+                  ? { ...c, damaged: false, cooldown: 0 }
+                  : c
+              );
+              logs.push(createLog('player', 'effect', `纳米修复群修复了 ${cabinToRepair.name}`, undefined, 1));
+            }
+          }
           
           if (coolingAmount > 0) {
             logs.push(createLog('player', 'effect', '维修冷却系统激活，额外降低所有舱室冷却', undefined, 1));

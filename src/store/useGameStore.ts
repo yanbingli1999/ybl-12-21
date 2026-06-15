@@ -15,7 +15,7 @@ import {
   checkBattleEnd,
   calculateReward,
 } from '../utils/battle';
-import { applyTechToConfig, applyTechToShip, applyCritAlertEffect, getExtraEnergyRegen } from '../utils/protoTech';
+import { applyTechToConfig, applyTechToShip, applyCritAlertEffect, tickEnemyStatusEffects } from '../utils/protoTech';
 import { addBattleRecord, loadBattleHistory, updateStats } from '../utils/storage';
 import { unassignAllDice } from '../utils/dice';
 
@@ -116,11 +116,13 @@ export const useGameStore = create<GameState>((set, get) => ({
     
     const { dice } = diceStore;
     const wasDefending = battleState.enemy.intent.type === 'defend';
-    let originalDefense = battleState.enemy.defense;
     
     let preparedEnemy = { ...battleState.enemy };
     if (wasDefending) {
-      preparedEnemy.defense = preparedEnemy.defense + 0.2;
+      preparedEnemy = {
+        ...preparedEnemy,
+        defense: preparedEnemy.baseDefense + 0.2,
+      };
     }
     
     const playerResult = executePlayerActions(
@@ -171,8 +173,16 @@ export const useGameStore = create<GameState>((set, get) => ({
     const enemyResult = executeEnemyIntent(
       newState.enemy,
       newState.player,
-      config
+      config,
+      techState
     );
+    
+    if (enemyResult.reflectDamage > 0) {
+      newState.enemy = {
+        ...newState.enemy,
+        hp: Math.max(0, newState.enemy.hp - enemyResult.reflectDamage),
+      };
+    }
     
     if (newState.enemy.intent.type === 'special') {
       const abilityName = newState.enemy.intent.description.replace('准备释放 ', '');
@@ -272,12 +282,27 @@ export const useGameStore = create<GameState>((set, get) => ({
     if (wasDefending) {
       newState.enemy = {
         ...newState.enemy,
-        defense: originalDefense,
+        defense: newState.enemy.baseDefense,
       };
     }
 
+    const effectTickResult = tickEnemyStatusEffects(newState.enemy);
+    newState.enemy = effectTickResult.enemy;
+    if (effectTickResult.expiredEffects.length > 0) {
+      if (effectTickResult.expiredEffects.includes('alert_marked')) {
+        newState.logs.push({
+          id: `log_${Date.now()}_effect_expire`,
+          turn: battleState.turn,
+          type: 'effect',
+          source: 'system',
+          message: '警戒标记效果消失',
+          timestamp: Date.now(),
+        });
+      }
+    }
+
     // #region debug-point H4:defense-rollback
-    fetch("http://127.0.0.1:7777/event",{method:"POST",body:JSON.stringify({sessionId:"battle-mechanics-bugs",runId:"pre-fix",hypothesisId:"H4",location:"useGameStore.ts:259",msg:"[DEBUG] Defense rollback",data:{wasDefending,defenseBeforeRollback:newState.enemy.defense,defenseAfterRollback:wasDefending?originalDefense:newState.enemy.defense,originalDefense,nextIntentWillBeGenerated:true},ts:Date.now()})}).catch(()=>{});
+    fetch("http://127.0.0.1:7777/event",{method:"POST",body:JSON.stringify({sessionId:"battle-mechanics-bugs",runId:"pre-fix",hypothesisId:"H4",location:"useGameStore.ts:259",msg:"[DEBUG] Defense rollback",data:{wasDefending,defenseBeforeRollback:newState.enemy.defense,defenseAfterRollback:newState.enemy.defense,baseDefense:newState.enemy.baseDefense,nextIntentWillBeGenerated:true},ts:Date.now()})}).catch(()=>{});
     // #endregion
     
     newState.enemy = generateEnemyIntent(newState.enemy);
@@ -293,10 +318,9 @@ export const useGameStore = create<GameState>((set, get) => ({
     newState.phase = 'player';
     
     const baseEnergyRegen = Math.floor(newState.player.maxEnergy * 0.5);
-    const extraEnergy = getExtraEnergyRegen(techState);
     newState.player = {
       ...newState.player,
-      energy: Math.min(newState.player.maxEnergy, newState.player.energy + baseEnergyRegen + extraEnergy),
+      energy: Math.min(newState.player.maxEnergy, newState.player.energy + baseEnergyRegen),
     };
     
     const replayAction: ReplayAction = {

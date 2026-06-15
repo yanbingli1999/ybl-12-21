@@ -1,4 +1,4 @@
-import type { Ship, GameConfig, Enemy, ProtoTechEffectType, ProtoTechState } from '../types';
+import type { Ship, GameConfig, Enemy, ProtoTechEffectType, ProtoTechState, EnemyStatusEffect, Die } from '../types';
 import { getTechById } from '../data/protoTech';
 
 export function isTechEnabled(techState: ProtoTechState, techId: string): boolean {
@@ -19,28 +19,12 @@ export function applyTechToConfig(
   let config = { ...baseConfig };
 
   if (isTechEnabled(techState, 'tech_reroll_preserve')) {
-    const tech = getTechById('tech_reroll_preserve');
-    config.maxRerolls = Math.max(0, config.maxRerolls + (tech?.sideEffect.value || 0));
+    config.maxRerolls = Math.max(0, config.maxRerolls - 1);
   }
 
   if (isTechEnabled(techState, 'tech_overheat_boost')) {
     const tech = getTechById('tech_overheat_boost');
-    config.overheatThreshold += tech?.effect.value || 0;
-  }
-
-  if (isTechEnabled(techState, 'tech_shield_absorption_boost')) {
-    const tech = getTechById('tech_shield_absorption_boost');
-    config.shieldAbsorptionRate = Math.min(0.95, config.shieldAbsorptionRate + (tech?.effect.value || 0));
-  }
-
-  if (isTechEnabled(techState, 'tech_repair_cooldown_reduce')) {
-    const tech = getTechById('tech_repair_cooldown_reduce');
-    config.repairCooldown = Math.max(1, config.repairCooldown - (tech?.effect.value || 0));
-  }
-
-  if (isTechEnabled(techState, 'tech_damage_crit_bonus')) {
-    const tech = getTechById('tech_damage_crit_bonus');
-    config.critMultiplier += tech?.effect.value || 0;
+    config.overheatThreshold -= tech?.sideEffect.value || 0;
   }
 
   return config;
@@ -81,10 +65,66 @@ export function applyCritAlertEffect(enemy: Enemy, techState: ProtoTechState): E
   const tech = getTechById('tech_crit_alert');
   if (!tech) return enemy;
 
+  const existingEffect = enemy.statusEffects.find(e => e.type === 'alert_marked');
+  let newEffects: EnemyStatusEffect[];
+  
+  if (existingEffect) {
+    newEffects = enemy.statusEffects.map(e =>
+      e.type === 'alert_marked' ? { ...e, duration: 1 } : e
+    );
+  } else {
+    newEffects = [...enemy.statusEffects, { type: 'alert_marked', duration: 1, value: tech.effect.value }];
+  }
+
+  const newEnemy = {
+    ...enemy,
+    statusEffects: newEffects,
+  };
+
+  return recalculateEnemyFromEffects(newEnemy);
+}
+
+export function recalculateEnemyFromEffects(enemy: Enemy): Enemy {
+  let attack = enemy.baseAttack;
+  let evasion = enemy.baseEvasion;
+  let defense = enemy.baseDefense;
+
+  for (const effect of enemy.statusEffects) {
+    if (effect.type === 'alert_marked') {
+      evasion = Math.max(0, evasion - effect.value);
+      attack = Math.floor(attack * 1.1);
+    }
+  }
+
   return {
     ...enemy,
-    evasion: Math.max(0, enemy.evasion - tech.effect.value),
-    attack: Math.floor(enemy.attack * (1 + tech.sideEffect.value)),
+    attack,
+    evasion,
+    defense,
+  };
+}
+
+export function tickEnemyStatusEffects(enemy: Enemy): { enemy: Enemy; expiredEffects: string[] } {
+  const expiredEffects: string[] = [];
+  const remainingEffects: EnemyStatusEffect[] = [];
+
+  for (const effect of enemy.statusEffects) {
+    const newDuration = effect.duration - 1;
+    if (newDuration <= 0) {
+      expiredEffects.push(effect.type);
+    } else {
+      remainingEffects.push({ ...effect, duration: newDuration });
+    }
+  }
+
+  const newEnemy = {
+    ...enemy,
+    statusEffects: remainingEffects,
+  };
+
+  return {
+    enemy: recalculateEnemyFromEffects(newEnemy),
+    expiredEffects,
   };
 }
 
@@ -105,15 +145,27 @@ export function getShieldEfficiencyMultiplier(techState: ProtoTechState): number
 }
 
 export function getRepairEfficiencyMultiplier(techState: ProtoTechState): number {
+  let multiplier = 1;
+
   if (isTechEnabled(techState, 'tech_repair_cooling')) {
     const tech = getTechById('tech_repair_cooling');
-    return 1 + (tech?.sideEffect.value || 0);
+    multiplier *= 1 + (tech?.sideEffect.value || 0);
   }
-  return 1;
+
+  if (isTechEnabled(techState, 'tech_repair_cooldown_reduce')) {
+    const tech = getTechById('tech_repair_cooldown_reduce');
+    multiplier *= 1 + (tech?.sideEffect.value || 0);
+  }
+
+  return multiplier;
 }
 
 export function hasRepairCooling(techState: ProtoTechState): boolean {
   return isTechEnabled(techState, 'tech_repair_cooling');
+}
+
+export function hasNanoRepairSwarm(techState: ProtoTechState): boolean {
+  return isTechEnabled(techState, 'tech_repair_cooldown_reduce');
 }
 
 export function getNormalDamageMultiplier(techState: ProtoTechState): number {
@@ -132,28 +184,40 @@ export function getEvasionCritBonus(techState: ProtoTechState, enemyEvasion: num
   return 0;
 }
 
-export function getEnergyCostMultiplier(techState: ProtoTechState): number {
-  if (isTechEnabled(techState, 'tech_overheat_boost')) {
-    const tech = getTechById('tech_overheat_boost');
-    return 1 + (tech?.sideEffect.value || 0);
-  }
-  return 1;
+export function hasCritPierceShield(techState: ProtoTechState): boolean {
+  return isTechEnabled(techState, 'tech_damage_crit_bonus');
 }
 
-export function getExtraEnergyRegen(techState: ProtoTechState): number {
-  if (isTechEnabled(techState, 'tech_energy_regen')) {
-    const tech = getTechById('tech_energy_regen');
+export function hasOverheatToShield(techState: ProtoTechState): boolean {
+  return isTechEnabled(techState, 'tech_overheat_boost');
+}
+
+export function getOverheatToShieldRate(techState: ProtoTechState): number {
+  if (isTechEnabled(techState, 'tech_overheat_boost')) {
+    const tech = getTechById('tech_overheat_boost');
     return tech?.effect.value || 0;
   }
   return 0;
 }
 
-export function getCabinDamageChanceBonus(techState: ProtoTechState): number {
-  if (isTechEnabled(techState, 'tech_repair_cooldown_reduce')) {
-    const tech = getTechById('tech_repair_cooldown_reduce');
-    return tech?.sideEffect.value || 0;
+export function getShieldReflectRate(techState: ProtoTechState): number {
+  if (isTechEnabled(techState, 'tech_shield_absorption_boost')) {
+    const tech = getTechById('tech_shield_absorption_boost');
+    return tech?.effect.value || 0;
   }
   return 0;
+}
+
+export function calculateDiceEnergyResonance(dice: Die[], techState: ProtoTechState): number {
+  if (!isTechEnabled(techState, 'tech_energy_regen')) {
+    return 0;
+  }
+
+  const tech = getTechById('tech_energy_regen');
+  if (!tech) return 0;
+
+  const sixCount = dice.filter(d => d.value === 6).length;
+  return sixCount * tech.effect.value;
 }
 
 export function hasFirstRerollPreserve(techState: ProtoTechState): boolean {

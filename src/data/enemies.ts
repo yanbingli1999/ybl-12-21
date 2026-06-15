@@ -187,8 +187,12 @@ export function createEnemy(templateId: string): Enemy {
     shield: template.shield,
     maxShield: template.shield,
     attack: template.attack,
+    baseAttack: template.attack,
     defense: template.defense,
+    baseDefense: template.defense,
     evasion: template.evasion,
+    baseEvasion: template.evasion,
+    statusEffects: [],
     description: template.description,
     sprite: template.sprite,
     intent: {

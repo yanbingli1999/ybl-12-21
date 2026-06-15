@@ -58,6 +58,11 @@ function validateSaveData(data: GameSaveData): GameSaveData {
     battleHistory: data.battleHistory || [],
     stats: { ...defaults.stats, ...data.stats },
     rewardPoints: typeof data.rewardPoints === 'number' ? data.rewardPoints : 0,
+    protoTech: data.protoTech || {
+      researched: [],
+      enabled: [],
+      coreData: 0,
+    },
   };
 }
 

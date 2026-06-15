@@ -55,6 +55,14 @@ export interface EnemyAbility {
   effect?: string;
 }
 
+export type EnemyStatusEffectType = 'alert_marked';
+
+export interface EnemyStatusEffect {
+  type: EnemyStatusEffectType;
+  duration: number;
+  value: number;
+}
+
 export interface Enemy {
   id: string;
   name: string;
@@ -66,6 +74,10 @@ export interface Enemy {
   attack: number;
   defense: number;
   evasion: number;
+  baseAttack: number;
+  baseEvasion: number;
+  baseDefense: number;
+  statusEffects: EnemyStatusEffect[];
   intent: EnemyIntent;
   abilities: EnemyAbility[];
   description: string;
@@ -202,12 +214,12 @@ export type ProtoTechEffectType =
   | 'shield_overflow_to_energy'
   | 'repair_cooling'
   | 'crit_increase_alert'
-  | 'overheat_threshold_boost'
-  | 'energy_regen_boost'
-  | 'damage_crit_bonus'
-  | 'shield_absorption_boost'
+  | 'overheat_to_shield'
+  | 'dice_energy_resonance'
+  | 'crit_pierce_shield'
+  | 'shield_reflect'
   | 'evasion_crit_penalty'
-  | 'repair_cooldown_reduce';
+  | 'nano_repair_swarm';
 
 export interface ProtoTechSideEffect {
   type: string;
